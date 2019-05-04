@@ -1,0 +1,254 @@
+---
+title: "Processing Geospatial Data in R"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1. How to download and visualize species occurrence data from GBIF(Global Biodiversity Information Facility)? 
+
+First, we want to download the necessary package and load it. 
+```{r}
+#install the package needed to download occurrence data from GBIF
+install.packages("rgbif")
+
+#load the downloaded package 
+library(rgbif)
+```
+
+For this tutortial, I am going to focus on the species Libellula saturata, the flame skimmers that are often found on the campus of UC Berkeley. To search for the occurrence data of this species in GBIF, we need to first find the taxonkeys from the GBIF backbone for our species of interest.
+```{r}
+taxon_key <- name_suggest(q ='Libellula saturata', rank='species')
+taxon_key
+keys <- taxon_key$key[1]
+```
+
+Now that we have the key, we can search for the occurrence records in the GBIF database. 
+```{r}
+#search for the occurrence record of flame skimmers with coordinates in US between the year 1900 and 2000. We only want records that are based on preserved specimens and with no geospatial issues. In addition, we want the records in the format of a data frame. The parameter "limit" limits the records returned. 
+flame <- occ_search(taxonKey = keys, country = "US", hasCoordinate = TRUE, basisOfRecord = "PRESERVED_SPECIMEN", year = '1900, 2000', hasGeospatialIssue = FALSE, return = "data", limit = 1000)
+```
+
+Let's take a look at the data frame.
+```{r}
+head(flame)
+```
+
+One thing to note is that there are uncertainty in geographic locations of these records. Take a look at the column "coordinateUncertaintyInMeters" and you will have an idea whether the record is worth keeping or not. For this tutorial I am going to set an arbitrary threshold of 50000m. 
+```{r}
+#Convert all the NA in the "coordinateUncertaintyInMeters" column into 0 for the convenience of subsetting.
+flame$coordinateUncertaintyInMeters[is.na(flame$coordinateUncertaintyInMeters)] <- 0
+#Subset the data frame according to the coordinate uncertainty in meters.
+flame_uncer_5000 <- flame[flame$coordinateUncertaintyInMeters < 5000,]
+```
+
+While there are a lot of columns in this dataset, not all of them are relevant to your analysis. Therefore, you should remove all the irrelevant columns to keep it clean and simple. Just remember to keep the column containing the unique ID for the records so you can always go back to the original dataset to search for information in the removed columns.
+For this tutorial, I am just going to keep these columns: 'key', 'decimalLatitude', 'decimalLongitude', 'year', and 'month'. Feel free to keep other columns that contain information relevant to your project/analysis. 
+```{r}
+flame_uncer_5000_cl <- flame_uncer_5000[, c('key', 'decimalLatitude','decimalLongitude','year','month')]
+```
+
+Now we can create a spatial point data frame from our occurrence data. Install and load the package needed to create a spatial point data frame. 
+```{r}
+install.packages("sp")
+library(sp)
+```
+
+Create a spatial point data frame based on the flame skimmer data frame we downloaded from GBIF. 
+```{r}
+#Create the spatial point data frame for the species occurrence of flame skimmers. Remember to input the coordinate sytem information of these records. If you are unsure, take a look at the column "geodeticDatum".
+flameskimmer_occur <- SpatialPointsDataFrame(coords = flame_uncer_5000_cl[, c('decimalLongitude', 'decimalLatitude')], data = flame_uncer_5000_cl, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+```
+
+2: How to download and visualize the climate dataset PRISM? 
+
+First, install and load the package needed to download the dataset. 
+```{r}
+install.packages("prism")
+library(prism)
+```
+
+Since we are only interested in the occurrence records of flame skimmers between 1900 and 2000, we want to download the monthly climate data for all these years. There are multiple climate variables available in the PRISM dataset. But for this tutorial, we will just focus on precipitation. 
+```{r}
+#Set the directory where you want to put the data.
+options(prism.path = "C:\\Users\\Sarah\\Documents\\GIS Library Fellow\\PRISM_data")
+#Download the data. The parameter "ppt" is short for "precipitation". 
+get_prism_monthlys("ppt", years = 1900:2000, mon = 1:12, keepZip = FALSE) 
+```
+
+Take a look at the files downloaded to make sure you have right data. 
+```{r}
+prism_files <- ls_prism_data(name = TRUE)
+prism_files
+```
+
+Since we have downloaded the necessary precipitation data, it is time to create a rasterstack from these data. The created rasterstack will be a stack of raster layers with the same geographic extent and resolution. 
+```{r}
+ppt_stack <- prism_stack(prism_files$files)
+```
+
+Make a very simple plot of the first raster data layer in the stack. The title of the plot is the file name. 
+```{r}
+#Plot the first raster layer within the raster stack with the file name as the title. 
+plot(raster::subset(ppt_stack, 1), main = names(raster::subset(ppt_stack, 1)))
+```
+
+We need to know the resolution and coordinate system before we do anything with the PRISM dataset. 
+```{r}
+#Take a look at the coordinate system of the PRISM dataset
+proj4string(ppt_stack)
+#Take a look at the resolution of the dataset
+xres(ppt_stack)
+```
+
+3. How to match the environmental variable with the occurrence (i.e. what were the monthly precipitation levels at the locations where flame skimmers were found)?
+
+One thing to note is that the file names of the PRISM data cleary show the time frame of the dataset. For example, the file "PRISM_ppt_stable_4kmM2_190001_bil.bil" contains the monthly precipitation data for January in 1900. Thus, it would be fairly convenient for us to find the files that contain precipitation data at the time the specimens were collected. 
+```{r}
+#Take a look at the names of the PRISM files.
+names(ppt_stack)
+```
+
+First, let's take a look at the way the time of collection is formatted in the occurrence data.
+```{r}
+#Check the first few rows of the attribute table of the spatial point data frame. 
+head(flame_uncer_5000_cl)
+```
+
+TO make it easier to match the pattern in PRISM file names (e.g. "PRISM_ppt_stable_4kmM2_190001_bil.bil"), we can reformat the occurrence data to match the format of time in the PRISM file names. 
+```{r}
+#Change the format of the column "month" in the data frame to "mm" by adding a zero in front of months smaller than 10. 
+flame_uncer_5000_cl$month[nchar(flame_uncer_5000_cl$month) < 2] <- paste("0",flame_uncer_5000_cl$month[nchar(flame_uncer_5000_cl$month) < 2], sep = "")
+#Create a new column 'time' by pasting the content in the month column to the year column. 
+flame_uncer_5000_cl$time <- paste(flame_uncer_5000_cl$year, flame_uncer_5000_cl$month, sep = "")
+```
+
+Now that the format of time is correct, we can then go on to create the spatial point data frame as in Task 1. 
+```{r}
+flameskimmer_occur <- SpatialPointsDataFrame(coords = flame_uncer_5000_cl[, c('decimalLongitude', 'decimalLatitude')], data = flame_uncer_5000_cl, proj4string = CRS("+proj=longlat +ellps=WGS84 +no_defs"))
+```
+
+Remember that in Task 2, we have already created a rasterstack, 'ppt_stack', from the PRISM precipitation data. For the next step, we can match the occurrences of flame skimmers with the precipitation data according to the time and location of collection. 
+```{r}
+#For every record in the spatial point data frame 'flameskimmer_occur':
+for (i in 1:nrow(flameskimmer_occur)) {
+  #Subset the rasterstack 'ppt_stack' by searching the file names of its rasterlayers for the time of collection of each occurrence record.
+  ppt_slice <- subset(ppt_stack, grep(flameskimmer_occur$time[i], names(ppt_stack), value = TRUE))
+  #Extract the value of the raster layers to the occurrence points and create a new column in 'flameskimmer_occur' called 'ppt' to store these values. Do't worry if you see the warning message of 'Transforming SpatialPoints to the CRS of the Raster', it is tranforming the coordinate system of the occurrence data to that of the precipitation data in order to extract the values. 
+  flameskimmer_occur$ppt[i] <- extract(ppt_slice, flameskimmer_occur[i,])
+}
+```
+
+Feel free to take a look at the 'ppt' column we created to check if there are any 'NA's. 
+```{r}
+flameskimmer_occur$ppt
+any(is.na(flameskimmer_occur$ppt))
+```
+
+4.  How to visualize and manipulate land cover data in R? 
+
+The dataset we will work with in this part of the tutorial is the Modeled Historical Land Use and Land Cover for the Conterminous United States: 1938-2005.Go to the link (https://www.sciencebase.gov/catalog/item/59d3c73de4b05fe04cc3d1d1) and clicked on the option "download all" to download files for 1938 - 1992. Then go to the link (https://www.sciencebase.gov/catalog/item/5b96c2f9e4b0702d0e826f6d) download the first zipped file on the list of attached files called "CONUS_Landcover_Historical.zip". This are the files for 1992 - 2005. Extract the files and place them in your preferred directory. 
+
+First, let's take a look at the directory and create a list from the file names of the land cover data. 
+```{r}
+landcover.list <- list.files(path = "C:\\Users\\Sarah\\Documents\\GIS Library Fellow\\Land Cover\\CONUS_Landcover_Historical", pattern =".tif$", full.names=TRUE)
+```
+
+To find all the land cover data that match the time frame of our occurrences, again we need to do some pattern matching.  
+```{r}
+#First, create an empty list to store the file paths for the land cover data that match the time frame of the occurrence data. 
+LC_Selected <- list() 
+for (i in 1:nrow(flameskimmer_occur)) {
+  #For each occurrence record, search the file names of the available land cover data for the collection year of the occurrence. 
+  #If name_layer equals zero, then there is no land cover data for the collection year of the record. If the data is available, name_layer will be the file path to the corresponding dataset. 
+  name_layer <- grep(flameskimmer_occur$year[i], landcover.list, value = TRUE)
+  if (!identical(name_layer, character(0))) {
+    #Check if the filepath is already in the list. 
+    if (!name_layer %in% LC_Selected){
+      LC_Selected <- append(LC_Selected, name_layer)
+    }
+  }
+}
+```
+
+Now we have all the land cover data for the years the flame skimmers were collected. Let's align these data with the climate data we already have in terms resolution, projection, and spatial extent. 
+
+First, we need to install and load the package gdalUtils and dplyr.
+```{r}
+install.packages("gdalUtils")
+library(gdalUtils)
+install.packages("dplyr")
+library(dplyr)
+```
+
+Then we can use the function align_rasters in the package gdalUtils to align the land cover datasets in the list to the climate datasets.
+```{r}
+#Create an empty raster stack. 
+LC_aligned <- stack()
+for (i in 1: length(LC_Selected)) {
+  # For every dataset in the list, align the raster to a PRISM dataset (extent, resolution, projection)
+  new_slice <- align_rasters(LC_Selected[i], "C:\\Users\\Sarah\\Documents\\Essig_GETITDONE\\PRISM\\PRISM_ppt_stable_4kmM2_189501_bil\\PRISM_ppt_stable_4kmM2_189501_bil.bil", paste(substr(LC_Selected[i], 1, nchar(LC_Selected[i])-4), "_aligned.tif", sep = ""), output_Raster = TRUE) 
+  #And create a new rasterstack from all the aligned land cover datasets. 
+  LC_aligned <- stack(new_slice, LC_aligned) 
+}
+```
+
+After we make sure the spatial extent, resolution, and coordinate system of the land cover data are the same as those of the climate dataset PRISM. We can start matching the land cover data with the occurrences. 
+```{r}
+for (i in 1:nrow(flameskimmer_occur)) {
+  if (as.numeric(flameskimmer_occur$year[i] >= 1938)){
+    slice <- subset(LC_aligned, grep(flameskimmer_occur$year[i], names(LC_aligned), value = TRUE))
+    flameskimmer_occur$lc[i] <- extract(slice, flameskimmer_occur[i,])
+  } else {
+     #Since the land cover data is available from 1938 to 2005, for this tutorial we will match all the occurrences before 1938 to the land cover data in 1938.
+    slice_before1938 <- subset(LC_aligned, grep("1938", names(LC_aligned), value = TRUE))
+    flameskimmer_occur$lc[i] <- extract(slice_before1938, flameskimmer_occur[i,])
+  }
+}
+```
+
+Feel free to take a look at the newly generated column to check if all the occurrences are matched with land cover data.
+```{r}
+flameskimmer_occur$lc
+```
+
+5. How to reclassify the land cover data?
+
+In the land cover dataset, one number represents an land cover class. The metadata shows, for example, 1 represents water, 6 represents mining, and 7 represents barren land. In total, there are 17 classes in this dataset. 
+Let's assume, however, that you no long need the class of barren land and would like to combine it with the class of developed land.Then we will need to reclassify the dataset.  
+
+First, create a reclassification scheme. In this case, we want to reclassify the dataset so that all the mining areas (represented by 6) will be reclassified as developed area (represented by 2). 
+```{r}
+reclass <- c(1, 1,
+             2, 2,
+             3, 3,
+             4, 4,
+             5, 5,
+             6, 2,
+             7, 7,
+             8, 8,
+             9, 9,
+             10, 10,
+             11,11,
+             12,12,
+             13, 13,
+             14, 14,
+             15, 15,
+             16, 16,
+             17, 17) #the classification scheme to reclassify the land cover dataset 1938 
+```
+
+Transform the list created above to a matrix. 
+```{r}
+reclass_m <- matrix(reclass,
+                ncol = 2,
+                byrow = TRUE) 
+```
+
+Run the reclassify function. 
+```{r}
+LC_aligned_recl <- reclassify(LC_aligned, reclass_m)
+```
+
